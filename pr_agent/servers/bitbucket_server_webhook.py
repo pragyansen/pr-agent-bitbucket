@@ -150,7 +150,7 @@ async def handle_webhook(background_tasks: BackgroundTasks, request: Request):
         get_logger().error(f"Missing required fields in Bitbucket Server webhook payload: {pr_id=}, {repository_name=}, {project_name=}")
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
-            content=json.dumps({"message": "Missing required fields"}),
+            content=jsonable_encoder({"message": "Missing required fields"}),
         )
 
     bitbucket_server = get_settings().get("BITBUCKET_SERVER.URL")
@@ -158,7 +158,7 @@ async def handle_webhook(background_tasks: BackgroundTasks, request: Request):
         get_logger().error("BITBUCKET_SERVER.URL not configured")
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content=json.dumps({"message": "Server configuration error"}),
+            content=jsonable_encoder({"message": "Server configuration error"}),
         )
     pr_url = f"{bitbucket_server}/projects/{project_name}/repos/{repository_name}/pull-requests/{pr_id}"
 
@@ -166,9 +166,10 @@ async def handle_webhook(background_tasks: BackgroundTasks, request: Request):
     log_context["event"] = "pull_request"
 
     commands_to_run = []
+    event_key = data.get("eventKey")
 
-    if (data["eventKey"] == "pr:opened"
-            or (data["eventKey"] == "repo:refs_changed" and data.get("pullRequest", {}).get("id", -1) != -1)):  # push event; -1 for push unassigned to a PR: #Check auto commands for creation/updating
+    if (event_key == "pr:opened"
+            or (event_key == "repo:refs_changed" and data.get("pullRequest", {}).get("id", -1) != -1)):  # push event; -1 for push unassigned to a PR: #Check auto commands for creation/updating
         apply_repo_settings(pr_url)
         if not should_process_pr_logic(data):
             get_logger().info(f"PR ignored due to config settings", **log_context)
@@ -181,7 +182,7 @@ async def handle_webhook(background_tasks: BackgroundTasks, request: Request):
                 status_code=status.HTTP_200_OK, content=jsonable_encoder({"message": "PR ignored due to auto feedback not enabled"})
             )
         get_settings().set("config.is_auto_command", True)
-        if data["eventKey"] == "pr:opened":
+        if event_key == "pr:opened":
             commands_to_run.extend(_get_commands_list_from_settings('BITBUCKET_SERVER.PR_COMMANDS'))
         else: #Has to be: data["eventKey"] == "pr:from_ref_updated"
             if not get_settings().get("BITBUCKET_SERVER.HANDLE_PUSH_TRIGGER"):
@@ -192,12 +193,14 @@ async def handle_webhook(background_tasks: BackgroundTasks, request: Request):
 
             get_settings().set("config.is_new_pr", False)
             commands_to_run.extend(_get_commands_list_from_settings('BITBUCKET_SERVER.PUSH_COMMANDS'))
-    elif data["eventKey"] == "pr:comment:added":
-        commands_to_run.append(data["comment"]["text"])
+    elif event_key == "pr:comment:added":
+        comment_text = data.get("comment", {}).get("text")
+        if comment_text:
+            commands_to_run.append(comment_text)
     else:
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
-            content=json.dumps({"message": "Unsupported event"}),
+            content=jsonable_encoder({"message": "Unsupported event"}),
         )
 
     async def inner():

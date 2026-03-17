@@ -343,7 +343,7 @@ async def handle_installed_webhooks(request: Request, response: Response):
         client_key = data.get("clientKey")
         username = data.get("principal", {}).get("username")
         if not shared_secret or not client_key or not username:
-            get_logger().error(f"Missing required fields in Bitbucket installed webhook: {shared_secret=}, {client_key=}, {username=}")
+            get_logger().error(f"Missing required fields in Bitbucket installed webhook: shared_secret={'present' if shared_secret else 'absent'}, {client_key=}, {username=}")
             return JSONResponse({"error": "Invalid payload"}, status_code=400)
         secrets = {
             "shared_secret": shared_secret,
