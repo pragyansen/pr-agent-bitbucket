@@ -36,8 +36,8 @@ def handle_request(
         try:
             with get_logger().contextualize(**log_context):
                 await PRAgent().handle_request(url, body)
-        except Exception as e:
-            get_logger().error(f"Failed to handle webhook: {e}")
+        except Exception:
+            get_logger().exception("Failed to handle webhook")
 
     background_tasks.add_task(inner)
 
@@ -118,8 +118,8 @@ def should_process_pr_logic(data) -> bool:
                 if all_files_outside:
                     get_logger().info(f"Ignoring PR because all files {changed_files} are outside allowed folders {allowed_folders}")
                     return False
-    except Exception as e:
-        get_logger().error(f"Failed 'should_process_pr_logic': {e}")
+    except Exception:
+        get_logger().exception("Failed 'should_process_pr_logic'")
         return True # On exception - we continue. Otherwise, we could just end up with filtering all PRs
     return True
 
@@ -143,19 +143,33 @@ async def handle_webhook(background_tasks: BackgroundTasks, request: Request):
         signature_header = request.headers.get("x-hub-signature", None)
         verify_signature(body_bytes, webhook_secret, signature_header)
 
-    pr_id = data["pullRequest"]["id"]
-    repository_name = data["pullRequest"]["toRef"]["repository"]["slug"]
-    project_name = data["pullRequest"]["toRef"]["repository"]["project"]["key"]
+    pr_id = data.get("pullRequest", {}).get("id")
+    repository_name = data.get("pullRequest", {}).get("toRef", {}).get("repository", {}).get("slug")
+    project_name = data.get("pullRequest", {}).get("toRef", {}).get("repository", {}).get("project", {}).get("key")
+    if not pr_id or not repository_name or not project_name:
+        get_logger().error(f"Missing required fields in Bitbucket Server webhook payload: {pr_id=}, {repository_name=}, {project_name=}")
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content=jsonable_encoder({"message": "Missing required fields"}),
+        )
+
     bitbucket_server = get_settings().get("BITBUCKET_SERVER.URL")
+    if not bitbucket_server:
+        get_logger().error("BITBUCKET_SERVER.URL not configured")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content=jsonable_encoder({"message": "Server configuration error"}),
+        )
     pr_url = f"{bitbucket_server}/projects/{project_name}/repos/{repository_name}/pull-requests/{pr_id}"
 
     log_context["api_url"] = pr_url
     log_context["event"] = "pull_request"
 
     commands_to_run = []
+    event_key = data.get("eventKey")
 
-    if (data["eventKey"] == "pr:opened"
-            or (data["eventKey"] == "repo:refs_changed" and data.get("pullRequest", {}).get("id", -1) != -1)):  # push event; -1 for push unassigned to a PR: #Check auto commands for creation/updating
+    if (event_key == "pr:opened"
+            or (event_key == "repo:refs_changed" and data.get("pullRequest", {}).get("id", -1) != -1)):  # push event; -1 for push unassigned to a PR: #Check auto commands for creation/updating
         apply_repo_settings(pr_url)
         if not should_process_pr_logic(data):
             get_logger().info(f"PR ignored due to config settings", **log_context)
@@ -168,7 +182,7 @@ async def handle_webhook(background_tasks: BackgroundTasks, request: Request):
                 status_code=status.HTTP_200_OK, content=jsonable_encoder({"message": "PR ignored due to auto feedback not enabled"})
             )
         get_settings().set("config.is_auto_command", True)
-        if data["eventKey"] == "pr:opened":
+        if event_key == "pr:opened":
             commands_to_run.extend(_get_commands_list_from_settings('BITBUCKET_SERVER.PR_COMMANDS'))
         else: #Has to be: data["eventKey"] == "pr:from_ref_updated"
             if not get_settings().get("BITBUCKET_SERVER.HANDLE_PUSH_TRIGGER"):
@@ -179,19 +193,21 @@ async def handle_webhook(background_tasks: BackgroundTasks, request: Request):
 
             get_settings().set("config.is_new_pr", False)
             commands_to_run.extend(_get_commands_list_from_settings('BITBUCKET_SERVER.PUSH_COMMANDS'))
-    elif data["eventKey"] == "pr:comment:added":
-        commands_to_run.append(data["comment"]["text"])
+    elif event_key == "pr:comment:added":
+        comment_text = data.get("comment", {}).get("text")
+        if comment_text:
+            commands_to_run.append(comment_text)
     else:
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
-            content=json.dumps({"message": "Unsupported event"}),
+            content=jsonable_encoder({"message": "Unsupported event"}),
         )
 
     async def inner():
         try:
             await _run_commands_sequentially(commands_to_run, pr_url, log_context)
-        except Exception as e:
-            get_logger().error(f"Failed to handle webhook: {e}")
+        except Exception:
+            get_logger().exception("Failed to handle webhook")
 
     background_tasks.add_task(inner)
 
@@ -214,8 +230,8 @@ async def _run_commands_sequentially(commands: List[str], url: str, log_context:
 
             with get_logger().contextualize(**log_context):
                 await PRAgent().handle_request(url, body)
-        except Exception as e:
-            get_logger().error(f"Failed to handle command: {command} , error: {e}")
+        except Exception:
+            get_logger().exception(f"Failed to handle command: {command}")
 
 def _process_command(command: str, url) -> str:
     # don't think we need this
