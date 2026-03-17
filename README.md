@@ -65,7 +65,16 @@ pr-agent --pr_url https://github.com/owner/repo/pull/123 review
 #### 4. Other Platforms
 - [GitLab webhook setup](https://qodo-merge-docs.qodo.ai/installation/gitlab/)
 - [BitBucket app installation](https://qodo-merge-docs.qodo.ai/installation/bitbucket/)
+- [BitBucket vanilla webhook (JWT-free)](#bitbucket-vanilla-webhook)
 - [Azure DevOps setup](https://qodo-merge-docs.qodo.ai/installation/azure/)
+
+<a id="bitbucket-vanilla-webhook"></a>
+### BitBucket Vanilla Webhook (Alternative Setup)
+For self-hosted installations that prefer a simpler setup without the Atlassian Connect App framework, PR-Agent supports "Vanilla" Bitbucket webhooks:
+1. Point your Bitbucket webhook to: `http://<your-server-url>/webhook`
+2. This endpoint bypasses JWT verification and processes payloads directly.
+3. Supported events: `pullrequest:created`, `pullrequest:updated`, `pullrequest:comment_created`.
+4. Note: This is an alternative to the standard App installation and is ideal for quick, private server deployments.
 
 [//]: # (## News and Updates)
 
