@@ -36,8 +36,8 @@ def handle_request(
         try:
             with get_logger().contextualize(**log_context):
                 await PRAgent().handle_request(url, body)
-        except Exception as e:
-            get_logger().error(f"Failed to handle webhook: {e}")
+        except Exception:
+            get_logger().exception("Failed to handle webhook")
 
     background_tasks.add_task(inner)
 
@@ -118,8 +118,8 @@ def should_process_pr_logic(data) -> bool:
                 if all_files_outside:
                     get_logger().info(f"Ignoring PR because all files {changed_files} are outside allowed folders {allowed_folders}")
                     return False
-    except Exception as e:
-        get_logger().error(f"Failed 'should_process_pr_logic': {e}")
+    except Exception:
+        get_logger().exception("Failed 'should_process_pr_logic'")
         return True # On exception - we continue. Otherwise, we could just end up with filtering all PRs
     return True
 
@@ -143,10 +143,23 @@ async def handle_webhook(background_tasks: BackgroundTasks, request: Request):
         signature_header = request.headers.get("x-hub-signature", None)
         verify_signature(body_bytes, webhook_secret, signature_header)
 
-    pr_id = data["pullRequest"]["id"]
-    repository_name = data["pullRequest"]["toRef"]["repository"]["slug"]
-    project_name = data["pullRequest"]["toRef"]["repository"]["project"]["key"]
+    pr_id = data.get("pullRequest", {}).get("id")
+    repository_name = data.get("pullRequest", {}).get("toRef", {}).get("repository", {}).get("slug")
+    project_name = data.get("pullRequest", {}).get("toRef", {}).get("repository", {}).get("project", {}).get("key")
+    if not pr_id or not repository_name or not project_name:
+        get_logger().error(f"Missing required fields in Bitbucket Server webhook payload: {pr_id=}, {repository_name=}, {project_name=}")
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content=json.dumps({"message": "Missing required fields"}),
+        )
+
     bitbucket_server = get_settings().get("BITBUCKET_SERVER.URL")
+    if not bitbucket_server:
+        get_logger().error("BITBUCKET_SERVER.URL not configured")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content=json.dumps({"message": "Server configuration error"}),
+        )
     pr_url = f"{bitbucket_server}/projects/{project_name}/repos/{repository_name}/pull-requests/{pr_id}"
 
     log_context["api_url"] = pr_url
@@ -190,8 +203,8 @@ async def handle_webhook(background_tasks: BackgroundTasks, request: Request):
     async def inner():
         try:
             await _run_commands_sequentially(commands_to_run, pr_url, log_context)
-        except Exception as e:
-            get_logger().error(f"Failed to handle webhook: {e}")
+        except Exception:
+            get_logger().exception("Failed to handle webhook")
 
     background_tasks.add_task(inner)
 
@@ -214,8 +227,8 @@ async def _run_commands_sequentially(commands: List[str], url: str, log_context:
 
             with get_logger().contextualize(**log_context):
                 await PRAgent().handle_request(url, body)
-        except Exception as e:
-            get_logger().error(f"Failed to handle command: {command} , error: {e}")
+        except Exception:
+            get_logger().exception(f"Failed to handle command: {command}")
 
 def _process_command(command: str, url) -> str:
     # don't think we need this

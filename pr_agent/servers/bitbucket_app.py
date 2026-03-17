@@ -54,9 +54,9 @@ async def get_bearer_token(shared_secret: str, client_key: str):
         response = requests.request("POST", url, headers=headers, data=payload)
         bearer_token = response.json()["access_token"]
         return bearer_token
-    except Exception as e:
-        get_logger().error(f"Failed to get bearer token: {e}")
-        raise e
+    except Exception:
+        get_logger().exception("Failed to get bearer token")
+        raise
 
 @router.get("/")
 async def handle_manifest(request: Request, response: Response):
@@ -65,8 +65,8 @@ async def handle_manifest(request: Request, response: Response):
     try:
         manifest = manifest.replace("app_key", get_settings().bitbucket.app_key)
         manifest = manifest.replace("base_url", get_settings().bitbucket.base_url)
-    except:
-        get_logger().error("Failed to replace api_key in Bitbucket manifest, trying to continue")
+    except Exception:
+        get_logger().exception("Failed to replace api_key in Bitbucket manifest, trying to continue")
     manifest_obj = json.loads(manifest)
     return JSONResponse(manifest_obj)
 
@@ -109,18 +109,20 @@ async def _validate_time_from_last_commit_to_pr_update(data: dict) -> bool:
         username =_get_username(data)
         commits_data = response.json() or {}
         values = commits_data.get('values') or []
-        if (not values or not isinstance(values, list) or not values[0].get('author') or not values[0]['author'].get('user')
-                or not values[0]['author']['user'].get('display_name')):
+        if (not values or not isinstance(values, list) or not values[0].get('author', {}).get('user', {}).get('display_name')):
             get_logger().warning("No commits returned for pull request or one of the required fields missing; skipping push validation",
                                  artifact={'values': values})
             return False
-        commit_username = commits_data['values'][0]['author']['user']['display_name']
+        commit_username = values[0].get('author', {}).get('user', {}).get('display_name')
         if username != commit_username:
             get_logger().warning(f"Mismatch in username {username} vs. commit_username {commit_username}")
             return False
 
-        time_pr_updated = pull_request['updated_on']
-        time_last_commit = commits_data['values'][0]['date']
+        time_pr_updated = pull_request.get('updated_on')
+        time_last_commit = values[0].get('date')
+        if not time_pr_updated or not time_last_commit:
+            get_logger().warning(f"Missing timestamps for push validation: {time_pr_updated=}, {time_last_commit=}")
+            return False
         from datetime import datetime
         ts1 = datetime.fromisoformat(time_pr_updated)
         ts2 = datetime.fromisoformat(time_last_commit)
@@ -131,9 +133,8 @@ async def _validate_time_from_last_commit_to_pr_update(data: dict) -> bool:
         else:
             get_logger().debug(f"Too much time passed since last commit",
                                artifact={'updated': time_pr_updated, 'last_commit': time_last_commit})
-    except Exception as e:
-        get_logger().exception(f"Failed to validate time difference between last commit and PR update",
-                               artifact={'error': e, 'data': data})
+    except Exception:
+        get_logger().exception("Failed to validate time difference between last commit and PR update")
     return is_valid_push
 
 async def _perform_commands_bitbucket(commands_conf: str, agent: PRAgent, api_url: str, log_context: dict, data: dict):
@@ -166,8 +167,8 @@ async def _perform_commands_bitbucket(commands_conf: str, agent: PRAgent, api_ur
             get_logger().info(f"Performing command: {new_command}")
             with get_logger().contextualize(**log_context):
                 await agent.handle_request(api_url, new_command)
-        except Exception as e:
-            get_logger().error(f"Failed to perform command {command}: {e}")
+        except Exception:
+            get_logger().exception(f"Failed to perform command {command}")
 
 
 def is_bot_user(data) -> bool:
@@ -178,8 +179,8 @@ def is_bot_user(data) -> bool:
         if actor and actor["type"].lower() not in allowed_actor_types:
             get_logger().info(f"BitBucket actor type is not 'user', skipping: {actor}")
             return True
-    except Exception as e:
-        get_logger().error(f"Failed 'is_bot_user' logic: {e}")
+    except Exception:
+        get_logger().exception("Failed 'is_bot_user' logic")
     return False
 
 
@@ -226,8 +227,8 @@ def should_process_pr_logic(data) -> bool:
                 get_logger().info(
                     f"Ignoring PR with target branch '{target_branch}' due to config.ignore_pr_target_branches settings")
                 return False
-    except Exception as e:
-        get_logger().error(f"Failed 'should_process_pr_logic': {e}")
+    except Exception:
+        get_logger().exception("Failed 'should_process_pr_logic'")
     return True
 
 
@@ -255,7 +256,7 @@ async def handle_request(data: dict):
         event = data.get("event")
         agent = PRAgent()
         if event == "pullrequest:created":
-            pr_url = data["data"]["pullrequest"]["links"]["html"]["href"]
+            pr_url = data.get("data", {}).get("pullrequest", {}).get("links", {}).get("html", {}).get("href")
             log_context["api_url"] = pr_url
             log_context["event"] = "pull_request"
             if pr_url:
@@ -265,7 +266,7 @@ async def handle_request(data: dict):
                         if get_settings().get("bitbucket_app.pr_commands"):
                             await _perform_commands_bitbucket("pr_commands", agent, pr_url, log_context, data)
         elif event == "pullrequest:updated": # PR updated, might be from a push (we will validate this later)
-            pr_url = data["data"]["pullrequest"]["links"]["html"]["href"]
+            pr_url = data.get("data", {}).get("pullrequest", {}).get("links", {}).get("html", {}).get("href")
             log_context["api_url"] = pr_url
             log_context["event"] = "pull_request"
             if pr_url:
@@ -276,16 +277,17 @@ async def handle_request(data: dict):
                         if get_settings().get("bitbucket_app.push_commands"):
                             await _perform_commands_bitbucket("push_commands", agent, pr_url, log_context, data)
         elif event == "pullrequest:comment_created":
-            pr_url = data["data"]["pullrequest"]["links"]["html"]["href"]
+            pr_url = data.get("data", {}).get("pullrequest", {}).get("links", {}).get("html", {}).get("href")
             log_context["api_url"] = pr_url
             log_context["event"] = "comment"
-            comment_body = data["data"]["comment"]["content"]["raw"]
-            with get_logger().contextualize(**log_context):
-                if get_identity_provider().verify_eligibility("bitbucket",
+            comment_body = data.get("data", {}).get("comment", {}).get("content", {}).get("raw")
+            if pr_url and comment_body:
+                with get_logger().contextualize(**log_context):
+                    if get_identity_provider().verify_eligibility("bitbucket",
                                                                  sender_id, pr_url) is not Eligibility.NOT_ELIGIBLE:
-                    await agent.handle_request(pr_url, comment_body)
-    except Exception as e:
-        get_logger().error(f"Failed to handle webhook: {e}")
+                        await agent.handle_request(pr_url, comment_body)
+    except Exception:
+        get_logger().exception("Failed to handle webhook")
 
 
 async def hacked_background_task(data: dict):
@@ -297,11 +299,15 @@ async def hacked_background_task(data: dict):
             get_logger().error(f"Hacked task: 'pullrequest' not found in payload. Keys: {list(data_inner.keys())}")
             return
             
-        pr_url = data_inner["pullrequest"]["links"]["html"]["href"]
-        
+        # Safer access to the pull request URL
+        pr_url = data_inner.get("pullrequest", {}).get("links", {}).get("html", {}).get("href")
+        if not pr_url:
+            get_logger().error(f"Hacked task: 'pr_url' not found in payload. Keys: {list(data_inner.keys())}")
+            return
+            
         # Handle cases where it's not a comment event (e.g., PR created)
         if "comment" in data_inner:
-            comment_text = data_inner["comment"]["content"]["raw"]
+            comment_text = data_inner.get("comment", {}).get("content", {}).get("raw", "/review")
         else:
             get_logger().info(f"Hacked task: No comment found, performing default PR action for {pr_url}")
             # If no comment, we can default to a command like '/review' or just log
@@ -311,8 +317,8 @@ async def hacked_background_task(data: dict):
         agent = PRAgent()
         await agent.handle_request(pr_url, comment_text)
 
-    except Exception as e:
-        get_logger().error(f"Hacked task crashed: {e}. Data keys: {list(data.keys()) if isinstance(data, dict) else 'Not a dict'}")
+    except Exception:
+        get_logger().exception(f"Hacked task crashed. Data keys: {list(data.keys()) if isinstance(data, dict) else 'Not a dict'}")
 
 
 @router.post("/webhook")
@@ -333,16 +339,19 @@ async def handle_installed_webhooks(request: Request, response: Response):
         get_logger().info(request.headers)
         data = await request.json()
         get_logger().info(data)
-        shared_secret = data["sharedSecret"]
-        client_key = data["clientKey"]
-        username = data["principal"]["username"]
+        shared_secret = data.get("sharedSecret")
+        client_key = data.get("clientKey")
+        username = data.get("principal", {}).get("username")
+        if not shared_secret or not client_key or not username:
+            get_logger().error(f"Missing required fields in Bitbucket installed webhook: {shared_secret=}, {client_key=}, {username=}")
+            return JSONResponse({"error": "Invalid payload"}, status_code=400)
         secrets = {
             "shared_secret": shared_secret,
             "client_key": client_key
         }
         secret_provider.store_secret(username, json.dumps(secrets))
-    except Exception as e:
-        get_logger().error(f"Failed to register user: {e}")
+    except Exception:
+        get_logger().exception("Failed to register user")
         return JSONResponse({"error": "Unable to register user"}, status_code=500)
 
 @router.post("/uninstalled")
